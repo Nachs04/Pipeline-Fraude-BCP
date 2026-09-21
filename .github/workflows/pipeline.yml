@@ -1,0 +1,126 @@
+name: Pipeline Fraude ML
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "**.py"
+      - "**.csv"
+      - "**.yml"
+      - "requirements.txt"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "**.py"
+      - "**.csv"
+      - "**.yml"
+      - "requirements.txt"
+  workflow_dispatch:
+
+jobs:
+  integracion:
+    name: "1. Integración"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revisar cambios
+        run: git status --short
+
+  calidad:
+    name: "2. Calidad"
+    needs: integracion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Compilar Python
+        run: python -m compileall src tests
+      - name: Verificar secretos en código
+        run: |
+          if grep -RniE "sk-[A-Za-z0-9_-]{20,}|password\s*=" src --exclude="*.pyc"; then
+            echo "Posible secreto encontrado"
+            exit 1
+          fi
+
+  pruebas:
+    name: "3. Pruebas"
+    needs: calidad
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: pytest -q
+
+  evaluacion_ml:
+    name: "4. Evaluación ML"
+    needs: pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m src.pipeline --data data/transactions.csv
+      - name: Publicar métricas
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-metrics
+          path: artifacts/metrics.json
+
+  evaluacion_ia:
+    name: "5. Evaluación IA"
+    needs: evaluacion_ml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m src.pipeline --data data/transactions.csv
+      - name: Validar fidelidad
+        run: python -c "import json; m=json.load(open('artifacts/metrics.json')); assert m['ai']['fidelity_rate'] == 1.0"
+
+  empaquetado:
+    name: "6. Empaquetado"
+    needs: evaluacion_ia
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tar -czf prototipo.tar.gz src tests requirements.txt Dockerfile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prototipo
+          path: prototipo.tar.gz
+
+  staging:
+    name: "7. Staging"
+    needs: empaquetado
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m src.pipeline --data data/transactions.csv
+      - run: python -c "import json; r=json.load(open('artifacts/staging_result.json')); assert r['status']=='PASS'"
+
+  promocion:
+    name: "8. Promoción"
+    needs: staging
+    runs-on: ubuntu-latest
+    environment:
+      name: demo
+    steps:
+      - uses: actions/checkout@v4
+      - name: Promover versión aprobada
+        run: echo "Versión lista para demostración. La aprobación se gestiona mediante el Environment 'demo'."
